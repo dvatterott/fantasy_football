@@ -1,5 +1,4 @@
-import pandas as pd
-import numpy as np
+import pandas as pd, numpy as np, math, requests
 
 class ffball_data():
     def __init__(self,position):
@@ -10,7 +9,7 @@ class ffball_data():
         self.data_frame = pd.DataFrame() #this will be the primary data site
 
 
-    def get_urls(self,week): #create dictionary of urls to get data from
+    def get_urls(self,week,pred=False): #create dictionary of urls to get data from
         urls = dict()
         
         urls['fpro'] = "http://www.fantasypros.com/nfl/projections/%s.php?week=%d?scoring=%s"\
@@ -27,8 +26,9 @@ class ffball_data():
             % (self.position,week,self.scoring_type)
         urls['cbs_actual1'] = "http://www.cbssports.com/fantasy/football/stats/sortable/points/%s/standard/week-%d?&_1:col_1=1&print_rows=9999"\
             % (self.position,week-1)
-        urls['cbs_actual2'] = "http://www.cbssports.com/fantasy/football/stats/sortable/points/%s/standard/week-%d?&_1:col_1=1&print_rows=9999"\
-            % (self.position,week)
+        if pred==False:
+            urls['cbs_actual2'] = "http://www.cbssports.com/fantasy/football/stats/sortable/points/%s/standard/week-%d?&_1:col_1=1&print_rows=9999"\
+                % (self.position,week)
 
         urls['fsharks'] = "http://www.fantasysharks.com/apps/Projections/WeeklyProjections.php?pos=%s&format=json&week=%d"\
             % (self.position,week)
@@ -44,17 +44,17 @@ class ffball_data():
         df = pd.read_html(urls['cbs_actual1'],header=2)[0]
         df = df[0:-1] #remove final row
         data = []
-        for i,x in enumerate(self.TEMPdata_frame.index):
-            searchfor = [self.TEMPdata_frame.LastName[x],self.TEMPdata_frame.FirstName[x]]
-            str_search = '.*'+searchfor[0]+'.*'+searchfor[1]+'.*|.*'+searchfor[1]+'.*'+searchfor[0]+'.*'
+        for i,x in enumerate(self.TEMPdata_frame.index): #loop through players
+            searchfor = [self.TEMPdata_frame.LastName[x],self.TEMPdata_frame.FirstName[x]] #get player name (hope no players have same name)
+            str_search = '.*'+searchfor[0]+'.*'+searchfor[1]+'.*|.*'+searchfor[1]+'.*'+searchfor[0]+'.*' #find name match
             points = df[df[name_column].str.contains(str_search)]
 
-            if i ==0: column_names = list(points.columns[1:-1])
+            if i ==0: column_names = list(points.columns[1:])
 
             if len(points) == 0:
-                data.append(np.zeros((1,16))[0])
+                data.append(np.zeros((1,17))[0])
             else:    
-                points = points.iloc[0,1:-1].values
+                points = points.iloc[0,1:].values
                 data.append(points)
 
         self.TEMPdata_frame = pd.concat([self.TEMPdata_frame, pd.DataFrame(data,columns=column_names)],axis=1)
@@ -71,17 +71,50 @@ class ffball_data():
                 data.append(0.0)
             elif len(points) == 1:
                 try:
-                    data.append(float(points))
+                    if math.isnan(points):
+                        data.append(0.0)
+                    else:
+                        data.append(float(points))
                 except:    
-                    data.append(float(0))
+                    data.append(0.0)
             else:
                 print('whoops!!!')
         return data
     
-    def update(self,week):
+    def create_opp_column(self,df): 
+        #get data about opponent, home or away, and bye week (or what i assume to be info about bye).  
+        df.columns = ['Name','Opp']
+        opp, home_away = [],[]
+        for x in self.TEMPdata_frame.index:
+            searchfor = [self.TEMPdata_frame.LastName[x],self.TEMPdata_frame.FirstName[x]]
+            str_search = '.*'+searchfor[0]+'.*'+searchfor[1]+'.*|.*'+searchfor[1]+'.*'+searchfor[0]+'.*'
+            points = df[df['Name'].str.contains(str_search)]['Opp'].values
+            if len(points) == 0:
+                opp.append(0)
+                home_away.append(0)
+            elif len(points) > 0:
+                opp.append(points[0][-2:])
+                if points[0][0] == '@':
+                    home_away.append(1)
+                else:
+                    home_away.append(2)
+        return opp,home_away
+    
+    def input_df(self,df):
+        self.data_frame = df
+        return self.data_frame
+    
+    def save_df(self):
+        self.data_frame.to_pickle('%ss_%d.pkl' % (self.position,self.season))
+    
+    def load_df(self):
+        self.data_frame = pd.read_pickle('%ss_%d.pkl' % (self.position,self.season))
+        return self.data_frame
+    
+    def update(self,week,pred=False):
         #update the data with a new week's data
         
-        urls = self.get_urls(week) #update urls
+        urls = self.get_urls(week,pred=pred) #update urls
         
         #------------------------------------------------------------------#
         #create the first dataframe and reference list
@@ -114,7 +147,13 @@ class ffball_data():
             if keys=='fftoday' or keys=='yahoo':
             #notice that yahoo is not yahoo predictions but fftoday predictions for yahoo's scoring system
                 df = pd.read_html(urls[keys],match='FFPts',header=16)[0]
+                if keys == 'fftoday':
+                    [opp,home_away] = self.create_opp_column(df[['Player  Sort First: Last:','Opp']])
+                    self.TEMPdata_frame['opp'] = opp
+                    self.TEMPdata_frame['home_away'] = home_away
+                    
                 df = df[['Player  Sort First: Last:','FFPts']]
+                
             
             elif keys=='cbs_predict' or keys=='cbs_actual2': #cbs predict doesnt have data for first 4 weeks...
                 df = pd.read_html(urls[keys],header=2)[0]
@@ -153,7 +192,6 @@ class ffball_data():
                 
             elif keys=='fsharks':
             # have to use requests for this site
-                import requests
                 header_data = {
                         'Accept-Encoding': 'gzip, deflate, sdch',
                         'Accept-Language': 'en-US,en;q=0.8',
@@ -176,9 +214,14 @@ class ffball_data():
                 self.TEMPdata_frame[keys] = self.create_df_column(df,'Player','FPTS')
             except: #let me know where the error was if this goes wrong
                 print(keys)
+                print(week)
             
         #------------------------------------------------------------------#
         #append temp df to main df
-        self.data_frame = self.data_frame.append(self.TEMPdata_frame)
-        self.TEMPdata_frame = pd.DataFrame()
-        return self.data_frame
+        if pred == True:
+            return self.TEMPdata_frame
+            
+        elif pred == False:
+            self.data_frame = self.data_frame.append(self.TEMPdata_frame)
+            self.TEMPdata_frame = pd.DataFrame()
+            return self.data_frame
